@@ -1,0 +1,3 @@
+include ':IPCBus'
+include ':app'
+rootProject.name = "IPCBusDemo"
