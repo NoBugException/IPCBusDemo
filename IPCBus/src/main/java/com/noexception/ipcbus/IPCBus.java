@@ -7,25 +7,20 @@ import android.content.ServiceConnection;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.TextUtils;
-import android.util.Log;
-
-import com.noexception.ipcbus.inter.ICPReceive;
+import com.noexception.ipcbus.error.ErrorConstant;
+import com.noexception.ipcbus.error.ErrorData;
 import com.noexception.ipcbus.inter.IIPCBusConnected;
 import com.noexception.ipcbus.message.IIPCBusService;
 import com.noexception.ipcbus.message.Request;
 import com.noexception.ipcbus.message.Responce;
 import com.noexception.ipcbus.message.ResultCode;
 import com.noexception.ipcbus.service.IPCBusService;
-
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 public class IPCBus {
 
-    // 客户端是否连接服务器
-    private boolean isConnect = false;
-
+    private static final String TAG = IPCBus.class.getSimpleName();
     private Context mContext;
 
     // 响应对象
@@ -34,8 +29,8 @@ public class IPCBus {
     // 接收类
      private Class<?> receiveClass;
 
-    // 服务缓存
-    private IIPCBusService iipcBusService;
+    // 根据不同的包名来管理服务代理
+    private Map<String, IIPCBusService> ipcBusServiceMap = new ConcurrentHashMap();
 
     private IPCBus() {}
 
@@ -70,10 +65,46 @@ public class IPCBus {
      *  初始化
      * @param mContext mContext
      */
-    public void init(Context mContext) {
+    public void init(Context mContext, String servicePackageName) {
         this.mContext = mContext;
         // 连接
-        connect(null);
+        connect(null, servicePackageName);
+    }
+
+    /**
+     * 填充错误数据
+     *
+     * @param errorCode 错误码
+     * @param description 错误描述
+     * @return fillErrorData
+     */
+    private ErrorData fillErrorData(int errorCode, String description) {
+        ErrorData errorData = new ErrorData();
+        errorData.setErrorCode(errorCode);
+        errorData.setDescription(description);
+        return errorData;
+    }
+
+    /**
+     * 意外断开重连
+     */
+    private class DeathRecipient implements IBinder.DeathRecipient {
+
+        private IIPCBusConnected iipcBusConnected;
+
+        // 服务对应的包名
+        private String servicePackageName;
+
+        public DeathRecipient(IIPCBusConnected iipcBusConnected, String servicePackageName){
+            this.iipcBusConnected = iipcBusConnected;
+            this.servicePackageName = servicePackageName;
+        }
+
+        @Override
+        public void binderDied() {
+            // 重连
+            connect(iipcBusConnected, servicePackageName);
+        }
     }
 
     /**
@@ -83,10 +114,13 @@ public class IPCBus {
 
         private IIPCBusConnected iipcBusConnected;
 
-        public IPCBusServiceConnection(IIPCBusConnected iipcBusConnected){
-            this.iipcBusConnected = iipcBusConnected;
-        }
+        // 服务对应的包名
+        private String servicePackageName;
 
+        public IPCBusServiceConnection(IIPCBusConnected iipcBusConnected, String servicePackageName){
+            this.iipcBusConnected = iipcBusConnected;
+            this.servicePackageName = servicePackageName;
+        }
 
         /**
          * Service连接成功
@@ -96,63 +130,79 @@ public class IPCBus {
          */
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
+            try {
+                service.linkToDeath(new DeathRecipient(iipcBusConnected, servicePackageName), 0);
+            } catch (RemoteException e) {
+                e.printStackTrace();
+            }
+            if (TextUtils.isEmpty(servicePackageName)) {
+                if (iipcBusConnected != null) {
+                    ErrorData errorData = fillErrorData(ErrorConstant.SERVICE_PACKAGE_EMPTY.ERRORCODE, ErrorConstant.SERVICE_PACKAGE_EMPTY.DESCRIPTION);
+                    iipcBusConnected.failed(errorData);
+                }
+                return;
+            }
+            IIPCBusService iipcBusService = IIPCBusService.Stub.asInterface(service);
+            if (iipcBusService == null) { // 如果对应的服务代理对象为空
+                if (iipcBusConnected != null) {
+                    ErrorData errorData = fillErrorData(ErrorConstant.CONNECT_PROXY_EMPTY_CONSTANT.ERRORCODE, ErrorConstant.CONNECT_PROXY_EMPTY_CONSTANT.DESCRIPTION);
+                    iipcBusConnected.failed(errorData);
+                }
+                // 移除空数据
+                ipcBusServiceMap.remove(servicePackageName);
+                return;
+            }
+            // 将当前代理对象添加到map集合来统一管理
+            ipcBusServiceMap.put(servicePackageName, iipcBusService);
             if (iipcBusConnected != null) {
                 iipcBusConnected.success();
             }
-            isConnect = true;
-            iipcBusService = IIPCBusService.Stub.asInterface(service);
         }
 
         @Override
         public void onServiceDisconnected(ComponentName name) {
             if (iipcBusConnected != null) {
-                iipcBusConnected.failed();
+                ErrorData errorData = fillErrorData(ErrorConstant.SERVICE_CONNECT_FAILED.ERRORCODE, ErrorConstant.SERVICE_CONNECT_FAILED.DESCRIPTION);
+                iipcBusConnected.failed(errorData);
             }
-            isConnect = false;
-            iipcBusService = null;
+            // 移除空数据
+            ipcBusServiceMap.remove(servicePackageName);
         }
     }
 
     /**
      * 客户端进程请求服务器
      *
-     * @param request request
+     * @param request 请求对象
      */
-    public Responce send (final Request request) {
+    public Responce send (Request request) {
+        if (mContext == null) {
+            // 保证上下文存在，即保证执行了init方法
+            throw new RuntimeException("context is null, please init context");
+        }
+        return send(request, mContext.getPackageName());
+    }
+    /**
+     * 客户端进程请求服务器
+     *
+     * @param request 请求对象
+     * @param servicePackageName 服务端包名
+     */
+    public Responce send (final Request request, final String servicePackageName) {
         if (request == null) {
             responce = nullRequest();
             return responce;
         }
-        if (isConnect) {
+        IIPCBusService iipcBusService = ipcBusServiceMap.get(servicePackageName);
+        if (iipcBusService != null) {
             // 发送消息
-            responce = sendMessage(request);
+            responce = sendMessage(request, servicePackageName);
             return responce;
         } else {
-            final CountDownLatch countDownLatch = new CountDownLatch(1);
             // 重新连接
-            connect(new IIPCBusConnected() {
-                @Override
-                public void success() {
-                    responce = sendMessage(request);
-                    countDownLatch.countDown();
-                }
-
-                @Override
-                public void failed() {
-                    responce = responceIfNotConnect();
-                    countDownLatch.countDown();
-                }
-            });
-            try {
-                // 等待最多两秒
-                countDownLatch.await(2, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-            if (responce == null) {
-                responce = responceIfNotConnect();
-                return responce;
-            }
+            connect(null, servicePackageName);
+            // 返回未连接的错误
+            responce = responceIfNotConnect();
         }
         return responce;
     }
@@ -160,12 +210,15 @@ public class IPCBus {
     /**
      * 发送消息
      *
-     * @param request request
+     * @param request 请求对象
+     * @param servicePackageName 服务包名
      * @return sendMessage
      */
-    private Responce sendMessage(Request request) {
-
+    private Responce sendMessage(Request request, String servicePackageName) {
+        IIPCBusService iipcBusService = ipcBusServiceMap.get(servicePackageName);
         if (iipcBusService == null) {
+            // 移除空数据
+            ipcBusServiceMap.remove(servicePackageName);
             // 服务没有连接
             return responceIfNotConnect();
         }
@@ -249,22 +302,59 @@ public class IPCBus {
 
     /**
      * 客户端进程，连接服务器进程
+     *
+     * @param iipcBusConnected iipcBusConnected
+     * @param servicePackageName servicePackageName
      */
-    private void connect(IIPCBusConnected iipcBusConnected) {
+    private void connect(IIPCBusConnected iipcBusConnected, String servicePackageName) {
+        if (mContext == null) {
+            // 保证上下文存在，即保证执行了init方法
+            throw new RuntimeException("context is null, please init context");
+        }
+        if (TextUtils.isEmpty(servicePackageName)) {
+            // 启动服务（如果没有执行包名，那么默认是应用本身）
+            startIPCService(iipcBusConnected);
+        } else {
+            // 启动服务
+            startIPCService(iipcBusConnected, servicePackageName);
+        }
+    }
+
+    /**
+     * 启动服务（同一个包之间的跨进程）
+     *
+     * @param iipcBusConnected iipcBusConnected
+     */
+    private void startIPCService(IIPCBusConnected iipcBusConnected) {
         if (mContext == null) {
             throw new RuntimeException("context is null");
         }
         Intent intent = new Intent(mContext, IPCBusService.class);
-        mContext.startService(intent);
-        mContext.bindService(intent, new IPCBusServiceConnection(iipcBusConnected), Context.BIND_AUTO_CREATE);
+        mContext.bindService(intent, new IPCBusServiceConnection(iipcBusConnected, mContext.getPackageName()), Context.BIND_AUTO_CREATE);
+    }
+
+    /**
+     * 启动服务（不同包之间的跨进程）
+     *
+     * @param iipcBusConnected iipcBusConnected
+     * @param packageName packageName
+     */
+    private void startIPCService(final IIPCBusConnected iipcBusConnected, String packageName) {
+        if (mContext == null) {
+            throw new RuntimeException("context is null");
+        }
+        Intent intent = new Intent();
+        intent.setComponent(new ComponentName(packageName, IPCBusService.class.getName()));
+        mContext.bindService(intent, new IPCBusServiceConnection(iipcBusConnected, packageName), Context.BIND_AUTO_CREATE);
     }
 
     /**
      * 断开连接
      */
-    public void unConnected() {
-        isConnect = false;
-        iipcBusService = null;
+    public void unConnected(String servicePackageName) {
         responce = null;
+        if (!TextUtils.isEmpty(servicePackageName)) {
+            ipcBusServiceMap.remove(servicePackageName);
+        }
     }
 }

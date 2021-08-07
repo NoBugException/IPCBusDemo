@@ -19,8 +19,12 @@ public class MainActivity2 extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main2);
-        // 初始化
-        IPCBus.getDefault().init(getApplicationContext());
+
+        // 与应用A连接
+        final String servicePackageName = "com.ipcbus.ipcbusservice";
+        // 与应用B连接
+        final String servicePackageName2 = "com.nobug.ipcbusservice2";
+
         Button addition = findViewById(R.id.addition);
         addition.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -36,9 +40,9 @@ public class MainActivity2 extends Activity {
                 }
                 request.setParamJson(jsonObject.toString());
                 // 发送消息
-                Responce responce = IPCBus.getDefault().send(request);
+                Responce responce = IPCBus.getDefault().send(request, servicePackageName);
                 if (responce != null) {
-                    Toast.makeText(MainActivity2.this, "加法结果:" + responce.getData(), Toast.LENGTH_LONG).show();
+                    Toast.makeText(MainActivity2.this, "加法结果:" + responce.getData(), Toast.LENGTH_SHORT).show();
                 }
             }
         });
@@ -61,7 +65,7 @@ public class MainActivity2 extends Activity {
                 // 发送消息
                 Responce responce = IPCBus.getDefault().send(request);
                 if (responce != null) {
-                    Toast.makeText(MainActivity2.this, "减法结果:" + responce.getData(), Toast.LENGTH_LONG).show();
+                    Toast.makeText(MainActivity2.this, "减法结果:" + responce.getData(), Toast.LENGTH_SHORT).show();
                 }
             }
         });
@@ -71,6 +75,6 @@ public class MainActivity2 extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         // 断开连接
-        IPCBus.getDefault().unConnected();
+        IPCBus.getDefault().unConnected(getPackageName());
     }
 }

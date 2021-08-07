@@ -18,8 +18,7 @@
             </intent-filter>
         </activity>
 
-        <activity android:name=".MainActivity2"
-            android:process=":serv"/>
+        <activity android:name=".MainActivity2" />
         <!--定义服务-->
         <service android:name="com.noexception.ipcbus.service.IPCBusService" />
     </application>
